@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <emmintrin.h>
+#include <nmmintrin.h>
 #include "kbit.h"
 
 // from bowtie-0.9.8.1
@@ -90,7 +91,52 @@ static uint32_t sse2_bit_count32(const __m128i* block, const __m128i* block_end)
 
     return tcnt[0] + tcnt[1] + tcnt[2] + tcnt[3];
 }
+#define DNA_OCC_CNT_TABLE_SIZE_IN_WORD	65536
+static void GenerateDNAOccCountTable(unsigned int *dnaDecodeTable)
+{
+	unsigned int i, j, c, t;
 
+	for (i=0; i<DNA_OCC_CNT_TABLE_SIZE_IN_WORD; i++) {
+		dnaDecodeTable[i] = 0;
+		c = i;
+		for (j=0; j<8; j++) {
+			t = c & 0x00000003;
+			dnaDecodeTable[i] += 1 << (t * 8);
+			c >>= 2;
+		}
+	}
+
+}
+int sse4_DNAcount64(uint64_t dw, int c)
+{
+    uint64_t dwA  = dw &  0xAAAAAAAAAAAAAAAAllu;
+	uint64_t dwNA = dw & ~0xAAAAAAAAAAAAAAAAllu;
+	uint64_t tmp;
+	switch (c) {
+	case 0: tmp = (dwA >> 1) | dwNA; break;
+	case 1: tmp = ~(dwA >> 1) & dwNA; break;
+	case 2: tmp = (dwA >> 1) & ~dwNA; break;
+	default: tmp = (dwA >> 1) & dwNA;
+	}
+	tmp = _mm_popcnt_u64(tmp);
+	if (c == 0) tmp = 32 - tmp;
+	return (int)tmp;
+}
+int builtin_DNAcount64(uint64_t dw, int c)
+{
+    uint64_t dwA  = dw &  0xAAAAAAAAAAAAAAAAllu;
+	uint64_t dwNA = dw & ~0xAAAAAAAAAAAAAAAAllu;
+	uint64_t tmp;
+	switch (c) {
+	case 0: tmp = (dwA >> 1) | dwNA; break;
+	case 1: tmp = ~(dwA >> 1) & dwNA; break;
+	case 2: tmp = (dwA >> 1) & ~dwNA; break;
+	default: tmp = (dwA >> 1) & dwNA;
+	}
+	tmp = __builtin_popcountl(tmp);
+	if (c == 0) tmp = 32 - tmp;
+	return (int)tmp;
+}
 int main(void)
 {
 	int i, N = 100000000;
@@ -104,7 +150,10 @@ int main(void)
 		x[i] = (uint64_t)lrand48() << 32 ^ lrand48();
 
 	fprintf(stderr, "\n===> Calculate # of 1 in an integer (popcount) <===\n");
-
+    t = clock(); cnt = 0;
+    for(i = 0; i < N; ++i) cnt+= _mm_popcnt_u64(x[i]);
+	fprintf(stderr, "%20s\t%20ld\t%10.6f\n", "sse4-64bit", (long)cnt, (double)(clock() - t) / CLOCKS_PER_SEC);
+ 
 	t = clock(); cnt = 0;
 	for (i = 0; i < N; ++i) cnt += kbi_popcount64(x[i]);
 	fprintf(stderr, "%20s\t%20ld\t%10.6f\n", "kbit", (long)cnt, (double)(clock() - t) / CLOCKS_PER_SEC);
@@ -122,6 +171,11 @@ int main(void)
 	fprintf(stderr, "%20s\t%20ld\t%10.6f\n", "SSE2-32bit", (long)cnt, (double)(clock() - t) / CLOCKS_PER_SEC);
 
 	fprintf(stderr, "\n===> Count '%c' in 2-bit encoded integers <===\n", "ACGT"[c]);
+	
+    t = clock(); cnt = 0;
+	for (i = 0; i < N; ++i) cnt += sse4_DNAcount64(x[i], c);
+	fprintf(stderr, "%20s\t%20ld\t%10.6f\n", "sse4-64bit", (long)cnt, (double)(clock() - t) / CLOCKS_PER_SEC);
+    
 
 	t = clock(); cnt = 0;
 	for (i = 0; i < N; ++i) cnt += kbi_DNAcount64(x[i], c);
@@ -129,9 +183,29 @@ int main(void)
 
 	t = clock(); cnt = 0;
 	for (i = 0; i < N; ++i) cnt += bt1_countInU64(x[i], c);
-	fprintf(stderr, "%20s\t%20ld\t%10.6f\n", "bowtie1", (long)cnt, (double)(clock() - t) / CLOCKS_PER_SEC);
+	fprintf(stderr, "%20s\t%20ld\t%10.6f\n", "wiki-popcount_2", (long)cnt, (double)(clock() - t) / CLOCKS_PER_SEC);
+    
+    t = clock(); cnt = 0;
+	for (i = 0; i < N; ++i) cnt += builtin_DNAcount64(x[i], c);
+	fprintf(stderr, "%20s\t%20ld\t%10.6f\n", "__builtin_popcountl", (long)cnt, (double)(clock() - t) / CLOCKS_PER_SEC);
 
-	fprintf(stderr, "\n");
+
+
+    unsigned int *dnaDecodeTable = calloc(DNA_OCC_CNT_TABLE_SIZE_IN_WORD, sizeof(unsigned int));
+    GenerateDNAOccCountTable(dnaDecodeTable);	
+    t = clock(); cnt = 0;
+    for (i = 0; i < N; ++i){ 
+        unsigned int tmp;
+        tmp = dnaDecodeTable[x[i]>>16&0xFFFF] ; 
+        tmp += dnaDecodeTable[x[i]&0xFFFF] ; 
+        tmp += dnaDecodeTable[x[i]>>32&0xFFFF]; 
+        tmp += dnaDecodeTable[x[i]>>48&0xFFFF];
+        cnt += tmp>>(c<<3)&255;
+    }
+    fprintf(stderr, "%20s\t%20ld\t%10.6f\n", "lookup", (long)cnt, (double)(clock() - t) / CLOCKS_PER_SEC);
+    free(dnaDecodeTable);    
+    
+    fprintf(stderr, "\n");
 	free(x);
 	return 0;
 }
